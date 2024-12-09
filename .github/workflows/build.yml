@@ -1,0 +1,86 @@
+name: Build-padavan-firmware
+
+on:
+  workflow_dispatch:
+  
+  watch:
+    types: [started]
+
+env:
+  src_git: https://github.com/MeIsReallyBa/padavan-4.4.git
+  src_dir: /opt/padavan
+  work_dir: /opt/padavan/trunk
+  firmware_dir: /opt/firmware
+  config_file: config
+  custom_script: custom.sh
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    if: github.event.repository.owner.id == github.event.sender.id
+    strategy:
+      matrix:
+        device: [RM2100]
+    permissions: 
+      contents: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      if: (!cancelled())
+      run: |
+        sudo apt-get -qq install -y \
+          unzip libtool-bin curl cmake gperf gawk flex bison nano xxd \
+          fakeroot kmod cpio git python3-docutils gettext automake autopoint \
+          texinfo build-essential help2man pkg-config zlib1g-dev libgmp3-dev \
+          libmpc-dev libmpfr-dev libncurses5-dev libltdl-dev wget libc-dev-bin &
+          wait
+          sudo timedatectl set-timezone "Asia/Shanghai"
+
+    - name: Clone source and Download toolchain
+      if: (!cancelled())
+      run: |
+        git clone --depth=1 $src_git $src_dir
+        cd $src_dir/toolchain-mipsel && chmod +x dl_toolchain.sh
+        ./dl_toolchain.sh
+    
+    - name: Import Custom configs
+      if: (!cancelled())
+      run: |
+        cp $config_file $work_dir/configs/templates/${{ matrix.device }}.config
+        mv $config_file $work_dir/.config
+        mv $custom_script $work_dir/
+        cd $work_dir
+        chmod +x build_firmware_modify && chmod +x $custom_script
+        ./$custom_script
+
+    - name: Compile the firmware
+      if: (!cancelled())
+      id: compile
+      run: |
+        cd $work_dir
+        fakeroot ./build_firmware_modify ${{ matrix.device }} 0
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        mkdir -p $firmware_dir
+        mv images/*.trx $firmware_dir
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@v4
+      if: ${{ success() }} && !cancelled()
+      with:
+        name: ${{ matrix.device }}
+        path: ${{ env.firmware_dir }}
+        if-no-files-found: error
+        
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v1
+      env:
+       GITHUB_TOKEN: ${{ github.token }}
+      with:
+       files: |
+         ${{ env.firmware_dir }}/*.trx
+       tag_name: ${{ steps.compile.outputs.release_tag }}
